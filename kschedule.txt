@@ -1,0 +1,245 @@
+struct rq {
+	struct task_struct {
+		struct sched_class{
+
+		}
+	}
+}
+
+
+void scheduler_tick(void){
+	struct rq *rq = cpu_rq(cpu);
+	update_rq_clock(rq){
+		delta = sched_clock_cpu(cpu_of(rq)) - sq->clock;
+		rq->clock += delta;
+		update_rq_clock_task(rq,delta);
+	}
+	
+}
+
+
+
+
+
+所有可运行的进程都按时间在一个红黑树中排序.等待时间最长的在最左侧.
+
+调度器类:
+enqueue_task想就绪队列添加一个新进程.在进程从睡眠状态变为可运行状态时,即发生该操作.
+dequeue_task提供逆向操作,将一个进程从就绪队列去除.在进程从可运行状态切换到不可运行状态是,会发生该操作.
+yield_task进程自愿放弃对处理器的控制权.
+check_preempt_curr用一个新欢行动哦进程来抢占当前进程,在用wake_up_new_task唤醒新进程时,会调用该函数.
+pick_next_task用于选择下一个将要运行的进程,而put_prev_task则在用另一个进程代替当前运行的进程之前调用.这两个函数负责想进程提供或撤销cup.
+set_curr_task进程的调度侧略发生变化.
+task_tick在每次激活周期性调度器时由调度器调用.
+new_task用于建立fork系统调用和调度器之间的联系.每次心进程建立后,则用new_task同志调度器.
+
+
+
+周期性调度器：在低分辨率定时器的每次时钟中断完成全局统计量更新后，每个cpu在软中断中执行一下操作：更新该cpu上当前进程内核态、用户态使用时间；调用该cpu上的定时器函数；启动周期性定时器（scheduler_tick）完成该cpu上任务的周期性调度工作；在支持动态定时器的系统中，可以关闭该调度器，从而进入深度睡眠过程；scheduler_tick查看当前进程是否运行太长时间，如果是，将进程的TIF_NEED_RESCHED置位，然后再中断返回时，调用schedule，进行进程切换操作
+
+scheduler_tick 函数执行
+  在cpu执行完全局统计后，每个cpu执行scheduler_tick,该函数实质上对rq->clock等进行更新后，主要对当前进程进行切换相关的考虑工作：
+如果当前进程是完全公平队列中的进程：则首先根据当前就绪队列中的进程数算出一个延迟时间间隔，大概每个进程分配2ms时间，然后按照该进程在队列中的总权重中占得比例，算出它该执行的时间X，如果该进程执行物理时间超过了X，则激发延迟调度；如果没有超过X，但是红黑树就绪队列中下一个进程优先级更高，即curr->vruntime-leftmost->vruntime > X,也将延迟调度
+如果当前进程是实时调度类中的进程：则如果该进程是SCHED_RR，则递减时间片[为HZ/10]，到期，插入到队列尾部，并激发延迟调度，如果是SCHED_FIFO，则什么也不做，直到该进程执行完成
+延迟调度的真正调度过程在：schedule中实现，会按照调度类顺序和优先级挑选出一个最高优先级的进程执行
+
+scheduler_tick 流程:
+void scheduler_tick(void)
+{
+    //printk(KERN_ALERT "entry:: scheduler_tick()");
+    int cpu = smp_processor_id();					//获得cpu id
+    struct rq *rq = cpu_rq(cpu);					//获得该cpu就绪队列(进程就绪队列)
+    struct task_struct *curr = rq->curr;			//获得当前正在进行的进程.
+
+    sched_clock_tick();								//更新rq clock的值?
+
+    raw_spin_lock(&rq->lock);
+    update_rq_clock(rq);							//更新就绪队列的两个成员rq->clock_task，rq->clock
+    update_cpu_load_active(rq);						//更新就绪队列的cpu_load[]数组。将数组中先前存储的负荷值向后移动一个位置，将当前就绪队列的负荷计入数组的第一个位置。
+    curr->sched_class->task_tick(rq, curr, 0);		//实际调用task_tick_fair
+    raw_spin_unlock(&rq->lock);
+
+    perf_event_task_tick();
+
+#ifdef CONFIG_SMP
+    rq->idle_at_tick = idle_cpu(cpu);
+    trigger_load_balance(rq, cpu);
+#endif
+}
+
+static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
+{
+    struct cfs_rq *cfs_rq;
+    struct sched_entity *se = &curr->se;
+
+    for_each_sched_entity(se) {						//没有遍历所有以sched_entity为索引的队列#define for_each_sched_entity(se) for (; se; se = NULL),只处理当前进程的实体
+        cfs_rq = cfs_rq_of(se);						//找到当前进程实体se所在的平衡队列.
+        entity_tick(cfs_rq, se, queued);			//最后调用到check_preempt_tick
+    }
+}
+
+
+
+static void
+check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+{
+    unsigned long ideal_runtime, delta_exec;
+
+    ideal_runtime = sched_slice(cfs_rq, curr);		//理想欲运行真实时间（推进的真实时钟）
+    delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;	//上次此进程运行以来的时间.(两次运行的时间间隔.)
+    if (delta_exec > ideal_runtime) {				//如果当前进程此次运行时间大于理想运行时间,说明此次运行时间用尽且超了.
+        resched_task(rq_of(cfs_rq)->curr);			//置位 TIF_NEED_RESCHED,等待周期调度器中断结束后,调用schedule来使得进程放弃运行.
+        /*
+         * The current task ran long enough, ensure it doesn't get
+         * re-elected due to buddy favours.
+         */
+        clear_buddies(cfs_rq, curr);
+        return;
+    }
+
+    /*
+     * Ensure that a task that missed wakeup preemption by a
+     * narrow margin doesn't have to wait for a full slice.
+     * This also mitigates buddy induced latencies under load.
+     */
+    if (!sched_feat(WAKEUP_PREEMPT))
+        return;
+
+    if (delta_exec < sysctl_sched_min_granularity)		//sysctl_sched_min_granularity表示进程最少运行时间
+        return;
+
+    if (cfs_rq->nr_running > 1) {						//列表内还有进程可运行时
+        struct sched_entity *se = __pick_first_entity(cfs_rq); 获得cfs红黑树最左进程的实体se
+        s64 delta = curr->vruntime - se->vruntime;		
+
+        if (delta < 0)			//当前进程需要运行的总时间小于另一个进程时间的时候 什么都不做,让当前进程继续运行.
+            return;
+
+        if (delta > ideal_runtime)			
+            resched_task(rq_of(cfs_rq)->curr);   -->test_tsk_need_resched 查看进程是否需要调度
+    }
+}
+
+scheduler_tick():
+每一个cpu都有一个就绪进程队列rq,在就绪队列中有两个子队列,cfs完全公平队列,rt实时进程队列.
+时钟注册一个中断,该中断引发周期调度器scheduler_tick(),在周期调度过程中,调度器先获得cpu_id,根据id获得cpu的rq进程就绪队列,取得当前运行的进程实例task_struct,然后调度类调用task_tick函数,在cfs类型的进程则用cfs调度类的task_tick函数处理(每个进程都需要指定一个在调度时处理它的调度类),在task_tick内,获得当前进程入口实例sched_entity,根据这个实例判断当前进程是否需要被调度(让出cpu),如果需要则resched_task(rq_of(cfs_rq)->curr);置位TIF_NEED_RESCHED,然后返回,等到中断结束返回后,调用schedule()进行进程切换.如果不需要调度,则在中断结束后,当前进程继续运行.
+
+
+
+主调度器:
+/*
+ * __schedule() is the main scheduler function.
+ */
+static void __sched __schedule(void)
+{
+    //printk(KERN_ALERT "entry:: __sched __scheduler()");
+    struct task_struct *prev, *next;
+    unsigned long *switch_count;
+    struct rq *rq;
+    int cpu;
+
+need_resched:
+    preempt_disable();			//禁止内核抢占
+    cpu = smp_processor_id();	//获得当前cpu
+    rq = cpu_rq(cpu);			//获得当前cpu维护的运行队列
+    rcu_note_context_switch(cpu);	//更新全局状态,标识当前cpu发生上下文的切换.
+    prev = rq->curr;			//获得当前进程curr
+
+    schedule_debug(prev);
+
+    if (sched_feat(HRTICK))
+        hrtick_clear(rq);
+
+    raw_spin_lock_irq(&rq->lock);	//锁住当前队列.
+
+    switch_count = &prev->nivcsw;	//进程切换计数
+    if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
+        if (unlikely(signal_pending_state(prev->state, prev))) {
+            prev->state = TASK_RUNNING;
+        } else {
+            deactivate_task(rq, prev, DEQUEUE_SLEEP);	//从运行队列中移出
+            prev->on_rq = 0;
+
+            /*
+             * If a worker went to sleep, notify and ask workqueue
+             * whether it wants to wake up a task to maintain
+             * concurrency.
+             */
+            if (prev->flags & PF_WQ_WORKER) {
+                struct task_struct *to_wakeup;
+
+                to_wakeup = wq_worker_sleeping(prev, cpu);
+                if (to_wakeup)
+                    try_to_wake_up_local(to_wakeup);
+            }
+        }
+        switch_count = &prev->nvcsw;
+    }
+
+    pre_schedule(rq, prev);
+
+    if (unlikely(!rq->nr_running))
+        idle_balance(cpu, rq);
+
+    put_prev_task(rq, prev);对当前运行的进程prev，通过调用它所属的类的put_prev_task方法，将当前进程放入运行队列的合适位置。
+    next = pick_next_task(rq);//挑选一个优先级最高的任务将其排进队列。  
+    clear_tsk_need_resched(prev); //清除prev(被调度出去的进程)的TIF_NEED_RESCHED标志。 
+    rq->skip_clock_update = 0;
+
+    if (likely(prev != next)) {
+        rq->nr_switches++;
+        rq->curr = next;		//rq->curr指针只想下一个要运行的进程实例
+        ++*switch_count;
+
+        context_switch(rq, prev, next); /* unlocks the rq */   //进程之间上下文切换  
+        /*
+         * The context switch have flipped the stack from under us
+         * and restored the local variables which were saved when
+         * this task called schedule() in the past. prev == current
+         * is still correct, but it can be moved to another cpu/rq.
+         */
+        cpu = smp_processor_id();
+        rq = cpu_rq(cpu);
+    } else
+        raw_spin_unlock_irq(&rq->lock);
+
+    post_schedule(rq);
+
+    preempt_enable_no_resched();
+    if (need_resched())
+        goto need_resched;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

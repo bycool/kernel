@@ -1,0 +1,264 @@
+概述：
+	一个完整的linux系统有很多文件组成，文件中储存了程序、数据和各种信息。层次化的目录结构用于对文件进行编目和分组。
+	为了支持各种本机的文件系统，且在同时可以访问其他操作系统的文件，linux内核在用户进程和文件系统实现之间引入了一个抽象层，该抽象层被称为虚拟文件系统VFS
+	VFS用来提供操作文件、目录以及其他对象的统一方法。还有必须能够与各种方法给出的具体文件系统的实现达成妥协。
+
+VFS类型：
+	基于磁盘的文件系统，在非易失介质上存储文件的典型方法。
+	虚拟文件系统，在内核中生成。一种使用户应用程序与用户通讯的方法。proc是一个典型的例子。
+	网络文件系统，基于磁盘的文件系统和虚拟文件系统之间的折中。
+
+8.2.1 inode
+	inode的成员可以分为两类：描述文件状态的元数据（访问权限，上次修改时间）; 保存实际文件内容的数据段或指向数据的指针。
+	查找/usr/bin/emacs的inode的过程：查找起始于inode，它表示根目录/。该目录由一个inode表示，其数据段并不包含普通数据，而是根目录下的各个目录项。这些项代表文件或者其他目录。每个想由两个成员组成：该目录项的数据所在的inode的编号;文件或者目录的名称。
+
+8.2.2 链接
+	链接用于建立文件系统对象之间的联系，有两种类型的链接：符号链接和硬链接。
+	符号链接：表示某个文件存在于特定的位置，其实实际的文件在其他地方。原文件被删除，链接符号依然存在，对每个符号链接都使用一个独立的inode。inode的数据换包含一个字符串，给出链接目标的路径。
+	硬链接：硬链接建立后，无法区分那个文件是原来的，那个是后来建立的，创建目录项使用了一个现存的inode编号。inode内有个计数器，每创建一个硬链接都将计数器加1,只有在计数器归0,我们才认为该inode不再使用，从系统将其删除。
+
+8.3 VFS的结构
+8.3.1结构体现
+	在抽象底层文件系统访问时，并未使用固定的函数，而是使用了函数指针。这些指针保存在两个结构体里，
+	（1），inode操作：创建链接，文件重命名，在目录中生成新文件，删除文件。
+	（2），文件操作：作用于文件的数据内容。它们包含一些显然的操作（读写），还包括如设置文件指针和创建内存映射之类的操作。
+
+8.3.2 inode
+struct inode {
+        struct hlist_node       i_hash;
+        struct list_head        i_list;         /* backing dev IO list */
+        struct list_head        i_sb_list;
+        struct list_head        i_dentry;
+        unsigned long           i_ino;			//inode的唯一的编号标识
+        atomic_t                i_count;		//使用计数器，制定访问该inode结构的进程数目
+        unsigned int            i_nlink;
+        uid_t                   i_uid;			
+        gid_t                   i_gid;			
+        dev_t                   i_rdev;			//inode表示设备文件时需要i_rdev，它表示与哪个设备进行通信。i_rdev只是个数字。
+        u64                     i_version;
+        loff_t                  i_size;			//文件长度，字节计算
+        struct timespec         i_atime;		//最后访问时间
+        struct timespec         i_mtime;		//最后修改时间
+        struct timespec         i_ctime;		//最后修改inode的时间
+        blkcnt_t                i_blocks;		//文件按块计算的长度
+        unsigned int            i_blkbits;
+        unsigned short          i_bytes;
+        umode_t                 i_mode;			//文件访问权限和所有权限
+        const struct inode_operations   *i_op;
+        const struct file_operations    *i_fop; /* former ->i_op->default_file_ops */
+        struct super_block      *i_sb;
+        struct address_space    *i_mapping;
+        struct address_space    i_data;
+        struct dquot            *i_dquot[MAXQUOTAS];
+        struct list_head        i_devices;
+        union {
+                struct pipe_inode_info  *i_pipe;
+                struct block_device     *i_bdev;	//块设备
+                struct cdev             *i_cdev;	//字符设备
+        };
+
+        __u32                   i_generation;
+
+        unsigned long           i_state;
+        unsigned long           dirtied_when;   /* jiffies of first dirtying 
+        unsigned int            i_flags;
+
+        atomic_t                i_writecount;
+
+        void                    *i_private; /* fs or device private pointer */
+};
+
+inode操作
+	内核提供了大量函数，对inode进行操作。为此定义了一个函数指针的集合。实际数据是通过具体文件系统的实现操作。
+	inode结构有两个指针i_op和i_fop，一个数组与特定于inode的操作有关，另一个数组提供了文件操作。
+struct inode_operations {
+        int (*create) (struct inode *,struct dentry *,int, struct nameidata *);
+        struct dentry * (*lookup) (struct inode *,struct dentry *, struct nameidata *);
+        int (*link) (struct dentry *,struct inode *,struct dentry *);
+        int (*unlink) (struct inode *,struct dentry *);
+        int (*symlink) (struct inode *,struct dentry *,const char *);
+        int (*mkdir) (struct inode *,struct dentry *,int);
+        int (*rmdir) (struct inode *,struct dentry *);
+        int (*mknod) (struct inode *,struct dentry *,int,dev_t);
+        int (*rename) (struct inode *, struct dentry *,
+                        struct inode *, struct dentry *);
+        int (*readlink) (struct dentry *, char __user *,int);
+        void * (*follow_link) (struct dentry *, struct nameidata *);
+        void (*put_link) (struct dentry *, struct nameidata *, void *);
+        void (*truncate) (struct inode *);
+        int (*permission) (struct inode *, int);
+        int (*check_acl)(struct inode *, int);
+        int (*setattr) (struct dentry *, struct iattr *);
+        int (*getattr) (struct vfsmount *mnt, struct dentry *, struct kstat *);
+        int (*setxattr) (struct dentry *, const char *,const void *,size_t,int);
+        ssize_t (*getxattr) (struct dentry *, const char *, void *, size_t);
+        ssize_t (*listxattr) (struct dentry *, char *, size_t);
+        int (*removexattr) (struct dentry *, const char *);
+        void (*truncate_range)(struct inode *, loff_t, loff_t);
+        long (*fallocate)(struct inode *inode, int mode, loff_t offset,
+                          loff_t len);
+        int (*fiemap)(struct inode *, struct fiemap_extent_info *, u64 start,
+                      u64 len);
+};
+
+struct dentry是一种标准化的数据结构，可以表示文件名或目录。它还建立了文件名及其inode之间的关联。
+
+2 inode链表
+	每个inode都有一个i_list成员，可以将inode存储在一个链表中，根据inode的状态，它可以有3中主要情况：
+	（1），inode存在于内存中，未关联到任何文件，也不处于活动使用状态。
+	（2），inode结构在内存中，正在有一个或多个进程使用，通常表示一个文件。两个链接计数器都大于0。
+	（3），inode处于活动使用状态，其数据内容已经改变，与存储戒指上的内容不同。
+
+	fs/inode.c中有两个全局变量用作表头，inode_unused用于有效但未活动的inode，inode_in_use用于所有使用但未被修改的inode，脏的inode保存在一个特定的超级块的链表里。每个inode不仅出现在特定于状态的链表中，还在一个散链表中出现，以支持根据inode编号和超级块快速访问inode，这两项的组合在系统范围内是唯一的。散链表是一个数组，可以借助全局变量inode_hashtable来访问。
+	
+8.3.3 特定于进程的信息
+每个进程的task_struct中都包含描述符相关的成员。
+struct task_struct {
+	//文件系统信息
+	struct fs_struct *fs;
+	//打开文件信息
+	struct files_struct *files;
+	//命名空间
+	struct nsproxy *nsproxy;	
+}
+进程的文件系统相关放在fs内，files包含当前进程的各个描述符。
+
+<sched.h>
+struct files_sturct {
+	struct fdtable *fdt;
+	struct fdtable fdtab;
+	int next_fd;//下一次打开心文件时使用的文件描述符
+	struct embedded_fd_set close_on_exec_init;//位图：
+	struct embedded_fd_set open_fds_init;
+	struct file * fd_array[NR_OPEN_DEFAULT]//每个数组项都是一个指针，只想每个打开文件的struct file实例。
+}
+
+struct fdtable {
+	    unsigned int max_fds;	//指定了进程当前可以处理的文件对象和文件描述符的最大值。
+        struct file ** fd;      /* current fd array */
+        fd_set *close_on_exec;	//位图：该位域保存了所有exec系统调用时将要关闭的文件描述符信息
+        fd_set *open_fds;		//指向位域的指针，该位域管理当前所有打开文件的描述符
+        struct rcu_head rcu;
+        struct fdtable *next;
+
+}
+
+struct file {
+        union {
+                struct list_head        fu_list;
+                struct rcu_head         fu_rcuhead;
+        } f_u;
+        struct path             f_path;
+#define f_dentry        f_path.dentry
+#define f_vfsmnt        f_path.mnt
+        const struct file_operations    *f_op;
+        atomic_long_t           f_count;
+        unsigned int            f_flags;
+        fmode_t                 f_mode;
+        loff_t                  f_pos;
+        struct fown_struct      f_owner;
+        const struct cred       *f_cred;
+        struct file_ra_state    f_ra;
+
+        u64                     f_version;
+
+        struct address_space    *f_mapping;
+};
+需要说明的是struct path结构体，该结构体内有inode，是进程和文件inode的直接链接。
+struct path {
+	struct vfsmount *mnt;
+	struct dentry *dentry;
+}
+struct dentry {
+        struct inode *d_inode;          /* Where the name belongs to - NULL is
+                                         * negative */
+}
+
+8.3.4 文件操作
+	文件不能只存储信息，必须容许操作其中的信息。从用户角度，文件操作是由标准库的函数执行。
+在通过系统调用进行，各个文件系统实现的接口可能不同，所以VFS层提供了抽象操作。
+	各个file实例都包含一个执行struct file_operations实现的指针。
+struct file_operations {
+        struct module *owner;
+        loff_t (*llseek) (struct file *, loff_t, int);
+        ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
+        ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
+        ssize_t (*aio_read) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+        ssize_t (*aio_write) (struct kiocb *, const struct iovec *, unsigned long, loff_t);
+        int (*readdir) (struct file *, void *, filldir_t);
+        unsigned int (*poll) (struct file *, struct poll_table_struct *);
+        int (*ioctl) (struct inode *, struct file *, unsigned int, unsigned long);
+        long (*unlocked_ioctl) (struct file *, unsigned int, unsigned long);
+        long (*compat_ioctl) (struct file *, unsigned int, unsigned long);
+        int (*mmap) (struct file *, struct vm_area_struct *);
+        int (*open) (struct inode *, struct file *);
+        int (*flush) (struct file *, fl_owner_t id);
+        int (*release) (struct inode *, struct file *);
+        int (*fsync) (struct file *, struct dentry *, int datasync);
+        int (*aio_fsync) (struct kiocb *, int datasync);
+        int (*fasync) (int, struct file *, int);
+        int (*lock) (struct file *, int, struct file_lock *);
+        ssize_t (*sendpage) (struct file *, struct page *, int, size_t, loff_t *, int);
+        unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
+        int (*check_flags)(int);
+        int (*flock) (struct file *, int, struct file_lock *);
+        ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
+        ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
+        int (*setlease)(struct file *, long, struct file_lock **);
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
