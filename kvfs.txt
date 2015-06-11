@@ -207,6 +207,129 @@ struct file_operations {
         int (*setlease)(struct file *, long, struct file_lock **);
 };
 
+1,目录信息
+除了打开文件描述符的类表之外，还必须管理其他特定于进程的数据。因而每个task_struct实例都包含一个指针，指向fs_struct
+struct fs_struct {
+	atomic_t count;
+	int umask;
+	struct dentry *root,*pwd,*altroot;
+	struct vfsmount * rootmnt, *pwdmnt,*altrootmnt;
+}
+
+
+^^
+
+8.4  处理VFS对象
+	对文件系统的操作只限于几个系统程序，用于装载mount和umount。
+	1注册文件系统
+	register_filesystem用来向内核注册文件系统。所有文件系统保存在一个单链表中，各个文件系统的名称存储为字符串。在新的文件系统注册到内核时，将逐元素扫描该链表，直到链表尾部或者找到所需的文件系统，如果找到所需的文件系统时，会返回一个适当的错误信息（一个文件系统不能注册两次），否则将新的文件操作系统放在该表的队尾。
+	用于描述文件系统的结构定义如下：
+struct file_system_type {
+	const char* name;
+	int fs_flags;
+	struct super_block *(*get_sb)(struct file_system_type *, int const char* ^^);
+	void (*kill_sb)(struct super_block*);
+	struct module *owner;
+	struct file_system_type *next;
+	struct list_head fs_head fs_supers;
+}
+
+装载和卸载：
+	目录树的装载和卸载比较复杂，需要对内核内部数据结构执行很多操作。文件系统的装载由mount系统吊顶用发起。
+vfsmount结构：
+struct vfsmount {
+        struct list_head mnt_hash;
+        struct vfsmount *mnt_parent;    /* fs we are mounted on */
+        struct dentry *mnt_mountpoint;  /* dentry of mountpoint */
+        struct dentry *mnt_root;        /* root of the mounted tree */
+        struct super_block *mnt_sb;     /* pointer to superblock */
+        struct list_head mnt_mounts;    /* list of children, anchored here */
+        struct list_head mnt_child;     /* and going through their mnt_child */
+        int mnt_flags;
+        /* 4 bytes hole on 64bits arches */
+        const char *mnt_devname;        /* Name of device e.g. /dev/dsk/hda1 */
+        struct list_head mnt_list;
+        struct list_head mnt_expire;    /* link in fs-specific expiry list */
+        struct list_head mnt_share;     /* circular list of shared mounts */
+        struct list_head mnt_slave_list;/* list of slave mounts */
+        struct list_head mnt_slave;     /* slave list entry */
+        struct vfsmount *mnt_master;    /* slave is on master->mnt_slave_list */
+        struct mnt_namespace *mnt_ns;   /* containing namespace */
+        int mnt_id;                     /* mount identifier */
+        int mnt_group_id;               /* peer group identifier */
+
+        atomic_t mnt_count;
+        int mnt_expiry_mark;            /* true if marked for expiry */
+        int mnt_pinned;
+        int mnt_ghosts;
+#ifdef CONFIG_SMP
+        int *mnt_writers;
+#else
+        int mnt_writers;
+#endif
+};
+
+！！超级块儿管理：
+在装载新的文件系统时，vfsmount并不是唯一需要在内核中创建的结构。装载操作开始于超级块的读取。
+struct super_block {
+	struct list_head s_list;	用于将系统中所有的超级块聚集到一个链表中
+	dev_t s_dev;	索引
+	unsigned long s_blocksize;	文件系统的块长度
+	unsigned char s_blocksize_bits; 
+	loff_t s_maxbytes;     		文件系统可以处理的最大文件长度
+	struct file_system_type *s_type; 	指向f_s_t实例
+	struct dentry  *s_root; 		将超级块与全局根目录的dentry项联起来
+	struct xattr_handler **s_xattr;  指向结构的指针，结构包含了一些用于处理拓展属性的函数指针
+	const struct super_operations   *s_op;  包含函数指针的结构，提供一般性的接口，用于处理超级块的操作。
+
+}
+
+struct super_operations {
+        struct inode *(*alloc_inode)(struct super_block *sb);
+        void (*destroy_inode)(struct inode *);
+
+        void (*dirty_inode) (struct inode *);
+        int (*write_inode) (struct inode *, int);
+        void (*drop_inode) (struct inode *);
+        void (*delete_inode) (struct inode *);
+        void (*put_super) (struct super_block *);
+        void (*write_super) (struct super_block *);
+        int (*sync_fs)(struct super_block *sb, int wait);
+        int (*freeze_fs) (struct super_block *);
+        int (*unfreeze_fs) (struct super_block *);
+        int (*statfs) (struct dentry *, struct kstatfs *);
+        int (*remount_fs) (struct super_block *, int *, char *);
+        void (*clear_inode) (struct inode *);
+        void (*umount_begin) (struct super_block *);
+
+        int (*show_options)(struct seq_file *, struct vfsmount *);
+        int (*show_stats)(struct seq_file *, struct vfsmount *);
+#ifdef CONFIG_QUOTA
+        ssize_t (*quota_read)(struct super_block *, int, char *, size_t, loff_t);
+        ssize_t (*quota_write)(struct super_block *, int, const char *, size_t, loff_t);
+#endif
+        int (*bdev_try_to_free_page)(struct super_block*, struct page*, gfp_t);
+};
+
+mount系统调用：
+mount系统调用的入口是sys_mount:
+SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,char __user *, type, unsigned long, flags, void __user *, data)
+->copy_mount_string(type, &kernel_type);
+->kernel_dir = getname(dir_name);
+->ret = copy_mount_string(dev_name, &kernel_dev);
+->ret = copy_mount_options(data, &data_page);
+->ret = do_mount(kernel_dev, kernel_dir, kernel_type, flags,(void *) data_page);
+
+do_mount(char *dev_name, char *dir_name, char *type_page,unsigned long flags, void *data_page)
+do_mount充当了一个多路分解器，将仍然需要完成的工作委派给与装载类型相关的各个函数：
+	do_remount修改已经装载的文件系统选项
+	do_lookback通过环回接口装载一个文件系统
+	do_move_mount 移动一个已经装载的文件系统
+	do_change_type负责处理共享，从属和不绑定装载，它可以改变装载标志或涉及的各个vfsmount实例之间建立所需数据结构的关联。
+	do_new_mount 处理普通装载操作 。
+	do_add_mount处理一些必须的锁定操作，并确保一个文件系统不会重复装载到同一个位置。主要工作委托给graft_tree
+	
+do_new_mount
 
 
 
@@ -222,6 +345,62 @@ struct file_operations {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+九：文件系统EXT2
+9.2.1 物理结构
+	必须建立各种结构来存放文件系统的数据，包括文件内容、目录层次结构的表示、相关的管理数据，以及用于管理文件系统内部信息的元数据。这些数据的持久副本显然需要存储在硬盘上，这样数据在二次绘画之间不会丢失。下一次启动重新解惑内核时，数据依然是可用的。硬盘和内存的需求不同，同一份数据通常会有两份，磁盘上一份持久储存，另一份在内存中处理。
+	块：
+	1,一方面有些文件操作系统存储在面向块的设备上，与设备之间的数据传输都以块为单位进行，不能传输单个字符。
+	2,ext2文件系统是一种基于块的文件系统，它将硬盘划分为若干块，每个块的长度都相同，按块管理元数据和文件内容，这意味着底层存储介质的结构影响到了文件系统的结构，这自然也会影响到所用的算法和数据结构的设计。
+
+	启动扇区是硬盘上的一个区域，在系统上电启动时，其内容由BIOS自动加载并执行。它包含一个启动装载程序，用于计算机安装的操作系统中选择一个启动，还负责继续启动过程。
 
 
 
