@@ -403,9 +403,19 @@ do_new_mount
 	启动扇区是硬盘上的一个区域，在系统上电启动时，其内容由BIOS自动加载并执行。它包含一个启动装载程序，用于计算机安装的操作系统中选择一个启动，还负责继续启动过程。
 
 
+总体概括ext2文件系统数据结构：
 
+			:boot sector  ||  block group1 || .... || block groupN ||
 
+block group :  superblock || 组描述符 || 数据位图 || inode位图 || inode table || data block ||
 
+起始是 启动扇区，之后接着的都是block group为单位的块组，块组里起始是superblock，只有第一块block group的superblock保存了整个文件系统的信息，其他的不一定，如果有也是第一个superblock的备份。。
+
+superblock：记录fs的整体信息，包括inode/block的总量，使用量，剩余量，以及文件系统的格式与相关信息等;
+inode：记录文件属性，一个文件占用一个inode，同时记录此文件的所有block号码;
+block：data block区，实际记录文件的内容，若文件太大时，会占用多个block。
+
+间接：当文件非常大时，inode中记录block号码用的空间不够时，使用block记录这些号码。使用2个block记录的叫双间接。使用3个block连接记录的叫3间接。
 
 
 
