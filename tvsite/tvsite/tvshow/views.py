@@ -38,7 +38,7 @@ def alogin(request):
 		if user is not None:  
 			if user.is_active:
 				auth.login(request,user)
-				return HttpResponseRedirect('/admin')  
+				return HttpResponseRedirect('index')  
 			else:  
 				errors.append('disabled account') 
 		else :  
@@ -48,4 +48,14 @@ def alogin(request):
 
 def alogout(request):  
 	auth.logout(request)
-	return HttpResponseRedirect('/admin')
+	return HttpResponseRedirect('')
+
+
+def index(request):
+#	username = request.COOKIES.get('username','')
+	username = request.user.username
+	f=open('log.txt','w')
+	f.write(str(request.COOKIES.get('username')))
+	f.close()
+
+	return render_to_response('index.html' ,{'username':username})
