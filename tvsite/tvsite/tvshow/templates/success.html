@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title></title>
+</head>
+
+<body>
+<h1>welcome {{username}} !</h1>
+
+
+<form enctype="multipart/form-data" method="POST" action="upload_success">
+<h1> </h1>
+<h3> download file </h3>
+
+   <input type="file" name="file" />
+   <input type="submit" value="upload" />
+</form>
+
+<p>+----------------------------------------------------------------------------------------------------------------------+</p>
+
+
+<h2>file list </h2>
+{% block content %}
+
+{% for post in posts %}
+<p>+----------------------------------------------------------------------------------------------------------------------+</p>
+<form enctype="multipart/form-data" method="POST" action="play_video">
+<p>+    user : {{ post.Uername }}</p>
+<p>+    file : {{ post.filename }}</p>
+<input type="hidden" name="filename" value={{post.filename}}>
+<input type="submit" value="play" />
+</form>
+
+<!--<p>{{ post.filepname }}</p> -->
+{% endfor %}
+{% endblock %}
+<p>+----------------------------------------------------------------+</p>
+
+<!--
+<form enctype="multipart/form-data" method="POST" action="download_success">
+<h3> download file </h3>
+<input type="text"  placeholder="Please input download file name" name = 'downloadfile'>
+<input type="submit" value="download" />
+<h1> </h1>
+<h1> </h1>
+</form>
+
+<form enctype="multipart/form-data" method="POST" action="play_video">
+<h3> play video </h3>
+<input type="text"  placeholder="Please input file name" name = 'playfile'>
+<input type="submit" value="play" />
+<h1> </h1>
+<h1> </h1>
+</form>
+-->
+
+
+</body>
+</html>
