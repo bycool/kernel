@@ -1,1 +1,271 @@
-{"error_code":31064,"error_msg":"expire time out error"}
+内存管理:
+概述:
+	内存管理实现涵盖许多领域:
+	.内存中的物理内存页的管理
+	.分配大块内存的伙伴系统.
+	.分配较小快内存的slab,slub和slob分配器
+	.分配非连续内存块的vmalloc机制.
+	.进程的地址空间.
+
+两种计算机,分别以不同的方法管理物理内存.
+UMA 一致内存访问: 将可用的内存以连续方式组织起来. 对于多处理器计算机来说,所有cpu共享同一块内存
+NUMA 非一致内存访问: 每个cpu都有自己的本地内存,支持特别快速访问本地内存,也支持访问其他cpu的本地内存,比访问本地内存慢些.
+
+首先,内存划分为结点,每个结点关联到系统的一个处理器,在内核中表示pg_data_t的实例.
+	各结点有划分为内存域,是进一步的划分.各个内存域关联了一个数组,用来组织属于该内存域的物理内存页(页帧).对于每个页帧都分配一个struct page实例以及所需的管理数据.
+	每个内存结点都保存在一个单链表中.供内核遍历.
+
+
+
+结构体:
+内存结点:
+typedef struct pglist_data {
+    struct zone node_zones[MAX_NR_ZONES];				//数组,包含了结点中各内存域的数据结构.
+    struct zonelist node_zonelists[MAX_ZONELISTS];		//制定了备用结点以及其内存域的类表,以便当前结点没有可用空间时,在备用结点分配内存.
+    int nr_zones;										//保存结点中不同内存域的数目
+#ifdef CONFIG_FLAT_NODE_MEM_MAP /* means !SPARSEMEM */
+    struct page *node_mem_map;
+#ifdef CONFIG_CGROUP_MEM_RES_CTLR
+    struct page_cgroup *node_page_cgroup;
+#endif
+#endif
+#ifndef CONFIG_NO_BOOTMEM
+    struct bootmem_data *bdata;							//指向自举内存分配器数据结构的实例.
+#endif
+#ifdef CONFIG_MEMORY_HOTPLUG
+    /*
+     * Must be held any time you expect node_start_pfn, node_present_pages
+     * or node_spanned_pages stay constant.  Holding this will also
+     * guarantee that any pfn_valid() stays that way.
+     *
+     * Nests above zone->lock and zone->size_seqlock.
+     */
+    spinlock_t node_size_lock;
+#endif
+    unsigned long node_start_pfn;											//该numa结点第一个页帧的逻辑编号.
+    unsigned long node_present_pages; /* total number of physical pages */	//结点中页帧的数目
+    unsigned long node_spanned_pages; /* total size of physical page		//结点以页帧为单位计算的长度.
+                         range, including holes */
+    int node_id;														//全局结点ID
+    wait_queue_head_t kswapd_wait;									//交换守护进程的等待队列.在将页帧换出结点时会用到.
+    struct task_struct *kswapd;										//kswapd指向负责该结点的交换守护进程的task_struct.
+    int kswapd_max_order;
+    enum zone_type classzone_idx;
+} pg_data_t;
+
+内存域:
+struct zone {
+    unsigned long watermark[NR_WMARK];							
+
+    unsigned long percpu_drift_mark;
+
+    unsigned long       lowmem_reserve[MAX_NR_ZONES];
+
+#ifdef CONFIG_NUMA
+    int node;
+    unsigned long       min_unmapped_pages;
+    unsigned long       min_slab_pages;
+#endif
+    struct per_cpu_pageset __percpu *pageset;
+    spinlock_t      lock;
+    int                     all_unreclaimable; /* All pages pinned */
+#ifdef CONFIG_MEMORY_HOTPLUG
+    seqlock_t       span_seqlock;
+#endif
+    struct free_area    free_area[MAX_ORDER];
+
+#ifndef CONFIG_SPARSEMEM
+    unsigned long       *pageblock_flags;
+#endif /* CONFIG_SPARSEMEM */
+
+#ifdef CONFIG_COMPACTION
+    unsigned int        compact_considered;
+    unsigned int        compact_defer_shift;
+#endif
+
+    ZONE_PADDING(_pad1_)
+
+    spinlock_t      lru_lock;
+    struct zone_lru {
+        struct list_head list;
+    } lru[NR_LRU_LISTS];
+
+    struct zone_reclaim_stat reclaim_stat;
+
+    unsigned long       pages_scanned;     /* since last reclaim */
+    unsigned long       flags;         /* zone flags, see below */
+
+    atomic_long_t       vm_stat[NR_VM_ZONE_STAT_ITEMS];
+
+    unsigned int inactive_ratio;
+
+
+    ZONE_PADDING(_pad2_)
+   
+    wait_queue_head_t   * wait_table;
+    unsigned long       wait_table_hash_nr_entries;
+    unsigned long       wait_table_bits;
+
+    struct pglist_data  *zone_pgdat;
+
+    unsigned long       zone_start_pfn;
+
+    unsigned long       spanned_pages;  /* total size, including holes */
+    unsigned long       present_pages;  /* amount of memory (excluding holes) */
+
+    const char      *name;
+} ____cacheline_internodealigned_in_smp;
+
+
+
+
+/*
+ * Each physical page in the system has a struct page associated with
+ * it to keep track of whatever it is we are using the page for at the
+ * moment. Note that we have no way to track which tasks are using
+ * a page, though if it is a pagecache page, rmap structures can tell us
+ * who is mapping it.
+ */
+struct page {
+    unsigned long flags;        /* Atomic flags, some possibly
+                     * updated asynchronously */
+    atomic_t _count;        /* Usage count, see below. */
+    union {
+        atomic_t _mapcount; /* Count of ptes mapped in mms,
+                     * to show when page is mapped
+                     * & limit reverse map searches.
+                     */
+        struct {        /* SLUB */
+            u16 inuse;
+            u16 objects;
+        };
+    };
+    union {
+        struct {
+        unsigned long private;      /* Mapping-private opaque data:
+                         * usually used for buffer_heads
+                         * if PagePrivate set; used for
+                         * swp_entry_t if PageSwapCache;
+                         * indicates order in the buddy
+                         * system if PG_buddy is set.
+                         */
+        struct address_space *mapping;  /* If low bit clear, points to
+                         * inode address_space, or NULL.
+                         * If page mapped as anonymous
+                         * memory, low bit is set, and
+                         * it points to anon_vma object:
+                         * see PAGE_MAPPING_ANON below.
+                         */
+        };
+#if USE_SPLIT_PTLOCKS
+        spinlock_t ptl;
+#endif
+        struct kmem_cache *slab;    /* SLUB: Pointer to slab */
+        struct page *first_page;    /* Compound tail pages */
+    };
+    union {
+        pgoff_t index;      /* Our offset within mapping. */
+        void *freelist;     /* SLUB: freelist req. slab lock */
+    };
+    struct list_head lru;       /* Pageout list, eg. active_list
+                     * protected by zone->lru_lock !
+                     */
+    /*
+     * On machines where all RAM is mapped into kernel address space,
+     * we can simply calculate the virtual address. On machines with
+     * highmem some memory is mapped into kernel virtual memory
+     * dynamically, so we need a place to store that address.
+     * Note that this field could be 16 bits on x86 ... ;)
+     *
+     * Architectures with slow multiplication can define
+     * WANT_PAGE_VIRTUAL in asm/page.h
+     */
+#if defined(WANT_PAGE_VIRTUAL)
+    void *virtual;          /* Kernel virtual address (NULL if
+                       not kmapped, ie. highmem) */
+#endif /* WANT_PAGE_VIRTUAL */
+#ifdef CONFIG_WANT_PAGE_DEBUG_FLAGS
+    unsigned long debug_flags;  /* Use atomic bitops on this */
+#endif
+
+#ifdef CONFIG_KMEMCHECK
+    /*
+     * kmemcheck wants to track the status of each byte in a page; this
+     * is a pointer to such a status block. NULL if not tracked.
+     */
+    void *shadow;
+#endif
+};
+
+
+
+内核初始化内存管理:
+	在内存管理的上下文中,初始化可以有多种含义.在许多cpu上,必须显示设置适于linux的内存模式.如在ia-32系统上需要切换到保护模式,然后内核才能检测可用内存和寄存器.在初始化过程中,还必须建立内存管理的数据结构,以及其他很多事务.因为内核在内存管理完全初始化之前就需要使用内存,在系统启动过程期间,使用了一个额外的简化形式的内存管理模块,然后又丢弃掉.
+
+1,建立数据结构.
+	对相关数据结构的初始化是从全局启动例程start_kernel中开始的.因为内存管理是非常重要的部分,因此在特定的体系结构的设置步骤中检测到内存并确定系统中内存的分配情况后,立即执行内存管理的初始化.内核在mm/page_alloc.c中定义一个pg_data_t实例管理所有的系统内存.
+
+	start_kernel				//从内存管理角度来看内核初始化.
+		|-> setup_arch			//特定于体系结构的设置函数,其中一项是负责初始化自举分配器.		
+		|-> setup_per_cpu_areas	//初始化源代码中定义的静态变量per-cpu变量,这个变量对系统中的每个cpu都有一个独立的副本.
+		|-> build_all_zonelists	//建立结点和内存域的数据结构
+		|-> mem_init			//特定于体系结构的函数,用于停用bootmen分配器并迁移到实际的内存管理函数.
+		|-> setup_per_cpu_pageset //
+
+
+
+
+
+------------------------------------------------------------
+从内存管理方法区分，计算机分为两种： 
+UMA 一致内存访问: 将可用的内存以连续方式组织起来. 对于多处理器计算机来说,所有cpu共享同一块内存
+NUMA 非一致内存访问: 每个cpu都有自己的本地内存,支持特别快速访问本地内存,也支持访问其他cpu的本地内存,比访问本地内存慢些.
+内存划分为节点，每个节点关联到一个处理器，在内呢中表现为pg_data_t的实例
+各个节点又划分为内存域。一个内存节点被分为三种类型：DMA，NORMAL，HIGH,所以一个节点最多由3个内存域组成。
+内核引用常量标记内存域：
+ZONE_DMA标记适合DMA的内存域。DMA：直接内存访问。
+ZONE_NORMAL标记可以直接映射到内存段的普通内存域。
+ZONE_HIGHMEM标记了超出内核段的物理内存。
+各个内存域都关联了一个数组，用来组织属于该内存域的物理内存页。对每个页帧都分配一个struct page实例以及所需的管理数据。
+各个内存节点保存在一个单链表中，供内核遍历。
+
+
+
+
+
+uma:
+typedef struct pglist_data {  
+    struct zone node_zones[3];          /*节点中的管理区*/    这里是zone的实体空间
+    struct zonelist node_zonelists[1]; 		这里是给zone进行排序的指针数组空间
+
+
+
+start_kernel(void)
+	build_all_zonelists()
+		__build_all_zonelists(NULL);
+			build_zonelists(pgdat);
+				build_zonelists_node(nr_zones=0, zone_type=2449408, zonelist=<optimized out>, pgdat=<optimized out>)
+					while(zone_type=ZONE_HIGHMEM | ZONE_NORMAL | ZONE_DMA){
+							zoneref_set_zone(zone, &zonelist->_zonerefs[nr_zones++]);
+							}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
